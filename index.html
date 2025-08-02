@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Vibe Lines</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700&family=Roboto+Mono:wght@400;700&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.7.77/Tone.js"></script>
+  <style>
+    html, body {
+      margin: 0;
+      overflow: hidden;
+      background: #0a0a0a;
+      height: 100%;
+      width: 100%;
+      font-family: 'Inter', sans-serif;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    canvas {
+      display: block;
+      cursor: none;
+      will-change: transform;
+      touch-action: none;
+    }
+    .ui-panel {
+      color: #f0f0f0;
+      font-family: 'Roboto Mono', monospace;
+      background: rgba(20, 20, 20, 0.6);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      border-radius: 24px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+      text-align: center;
+    }
+    #hud {
+      position: absolute;
+      top: 15px;
+      left: 15px;
+      padding: 12px 18px;
+      z-index: 10;
+      display: none;
+      min-width: 300px;
+      white-space: nowrap;
+    }
+    #timer {
+      width: 100%;
+      height: 6px;
+      background: rgba(255,255,255,0.15);
+      border-radius:3px;
+      margin-top:8px;
+      overflow:hidden;
+    }
+    #timerBar {
+      width: 100%;
+      height:100%;
+      background: #fff;
+      border-radius:3px;
+      transition: width 0.3s ease;
+    }
+    #game-message {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 30px 50px;
+        z-index: 20;
+        font-size: 2.5em;
+        font-weight: bold;
+        display: none;
+    }
+    #start-menu {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        padding: 30px 50px;
+        z-index: 20;
+    }
+    .game-button {
+        font-family: 'Roboto Mono', monospace;
+        font-size: 1.2em;
+        color: #fff;
+        background: rgba(255, 255, 255, 0.1);
+        border: 1px solid rgba(255, 255, 255, 0.2);
+        padding: 15px 30px;
+        border-radius: 12px;
+        cursor: pointer;
+        transition: background 0.2s ease;
+    }
+    .game-button:hover {
+        background: rgba(255, 255, 255, 0.2);
+    }
+  </style>
+</head>
+<body>
+  <div id="hud" class="ui-panel">
+    <div id="info">Score: 0 | Level: 01</div>
+    <div id="timer"><div id="timerBar"></div></div>
+  </div>
+  <div id="game-message" class="ui-panel"></div>
+  <div id="start-menu" class="ui-panel">
+      <h1>Vibe Lines</h1>
+      <button id="start-button" class="game-button">Start Game</button>
+  </div>
+  <canvas id="vibeCanvas"></canvas>
+
+  <script>
+    // Production Readiness: Wrap the entire script in an IIFE to avoid polluting the global scope.
+    (() => {
+      // --- Game State ---
+      let gameState = 'start-menu'; // 'start-menu', 'playing', 'win', 'lose'
+      let level = 1;
+      let lines = [];
+      let score = 0;
+      let maxTimeForLevel = 30;
+      let timeLeft = 30;
+      let timerStarted = false;
+      let confetti = [];
+      let timerInterval;
+      let numLines = 80;
+      let animationFrameId;
+
+      // Mobile detection and optimization
+      const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      
+      // --- Performance Optimizations ---
+      let frameCount = 0;
+      const PERFORMANCE_UPDATE_INTERVAL = isMobile ? 120 : 60; // Less frequent updates on mobile
+      let lastPerformanceUpdate = 0;
+      
+      // Pre-calculated constants
+      const INTERACTION_DIST_SQ = isMobile ? 250 * 250 : 300 * 300; // Smaller interaction radius on mobile
+      const COLLECTION_DIST_SQ = 40 * 40;
+      const TWO_PI = Math.PI * 2;
+      const HALF_PI = Math.PI / 2;
+      
+      // Object pools for performance
+      const tempPoint = { x: 0, y: 0 };
+      const tempVector = { x: 0, y: 0 };
+      
+      // Optimization flags
+      let gameIsFrozen = false;
+
+      // --- Audio State ---
+      let synth;
+      let audioReady = false;
+      const noteQueue = [];
+
+      // --- DOM Elements ---
+      const canvas = document.getElementById('vibeCanvas');
+      const ctx = canvas.getContext('2d');
+      const hud = document.getElementById('hud');
+      const info = document.getElementById('info');
+      const timerBar = document.getElementById('timerBar');
+      const startMenu = document.getElementById('start-menu');
+      const startButton = document.getElementById('start-button');
+      const gameMessage = document.getElementById('game-message');
+
+      // --- Mouse and Cursor Tracking ---
+      const mouse = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      let cursor = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+
+      // --- Optimized SVG Assets for Eyes ---
+      const eyeWhiteSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 424.3 424.3"><path d="M212.1 394.8c-100.7 0-182.6-81.9-182.6-182.6S111.4 29.5 212.1 29.5s182.6 81.9 182.6 182.6-81.9 182.6-182.6 182.6Z" style="fill:#fff"/><path d="M212.1 42.9c45.2 0 87.7 17.6 119.7 49.6s49.6 74.5 49.6 119.7-17.6 87.7-49.6 119.7-74.5 49.6-119.7 49.6-87.7-17.6-119.7-49.6-49.6-74.5-49.6-119.7 17.6-87.7 49.6-119.7 74.5-49.6 119.7-49.6m0-26.8c-108.2 0-196 87.8-196 196s87.8 196 196 196 196-87.8 196-196-87.7-196-196-196"/></svg>`;
+      const pupilSVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 424.3 424.3"><path d="M141 141h142.3v142.3H141z"/><path d="M222.3 159.5h38.8v38.8h-38.8zm-64 88.8h17.8v17.8h-17.8z" style="fill:#fff"/></svg>`;
+
+      const eyeWhiteImg = new Image();
+      const pupilImg = new Image();
+      let imagesLoaded = 0;
+      
+      const onImageLoad = () => {
+        imagesLoaded++;
+        if (imagesLoaded === 2) {
+          console.log('Eye images loaded');
+        }
+      };
+      
+      eyeWhiteImg.onload = onImageLoad;
+      pupilImg.onload = onImageLoad;
+      eyeWhiteImg.src = `data:image/svg+xml;base64,${btoa(eyeWhiteSVG)}`;
+      pupilImg.src = `data:image/svg+xml;base64,${btoa(pupilSVG)}`;
+
+      // --- Performance-optimized Functions ---
+
+      function setCanvasSize() {
+          // More conservative DPR for mobile devices
+          const dpr = isMobile ? Math.min(window.devicePixelRatio || 1, 1.5) : Math.min(window.devicePixelRatio || 1, 2);
+          const width = window.innerWidth;
+          const height = window.innerHeight;
+          
+          canvas.width = width * dpr;
+          canvas.height = height * dpr;
+          canvas.style.width = `${width}px`;
+          canvas.style.height = `${height}px`;
+          ctx.scale(dpr, dpr);
+          
+          // Set rendering optimizations - more conservative for mobile
+          ctx.imageSmoothingEnabled = !isMobile; // Disable on mobile for performance
+          ctx.imageSmoothingQuality = isMobile ? 'low' : 'medium';
+      }
+      
+      function repositionLinesOnResize() {
+          const padding = 50;
+          const maxX = window.innerWidth - padding;
+          const maxY = window.innerHeight - padding;
+          
+          for (let i = 0; i < lines.length; i++) {
+              const line = lines[i];
+              line.x = Math.max(padding, Math.min(line.x, maxX));
+              line.y = Math.max(padding, Math.min(line.y, maxY));
+          }
+      }
+
+      async function initAudio() {
+          if (audioReady) return;
+          try {
+              await Tone.start();
+              synth = new Tone.PolySynth(Tone.PluckSynth, { maxPolyphony: 8 }).toDestination(); // Reduced polyphony
+              synth.set({ volume: -8 });
+              new Tone.Loop(time => {
+                  if (noteQueue.length > 0) {
+                      const note = noteQueue.shift();
+                      synth.triggerAttackRelease(note.name, note.duration, time);
+                  }
+              }, "16n").start(0);
+              Tone.Transport.start();
+              audioReady = true;
+          } catch (e) {
+              console.error("Could not start audio", e);
+          }
+      }
+
+      function setGameState(newState) {
+          gameState = newState;
+          hud.style.display = 'none';
+          gameMessage.style.display = 'none';
+          startMenu.style.display = 'none';
+          gameIsFrozen = false; // Reset freeze state
+
+          switch (newState) {
+              case 'playing':
+                  hud.style.display = 'block';
+                  break;
+              case 'win':
+                  gameMessage.textContent = `LEVEL ${level.toString().padStart(2, '0')} COMPLETE!`;
+                  gameMessage.style.display = 'block';
+                  break;
+              case 'lose':
+                  gameIsFrozen = true; // Freeze character movement
+                  gameMessage.innerHTML = `TRY AGAIN<br><span style="font-size: 0.6em; font-weight: normal; opacity: 0.8;">Level Reached: ${level} | Score: ${score}</span><br><button id="restart-button" class="game-button" style="font-size: 0.5em; margin-top: 20px;">Restart</button>`;
+                  gameMessage.style.display = 'block';
+                  document.getElementById('restart-button').onclick = startGame;
+                  break;
+              case 'start-menu':
+                  startMenu.style.display = 'block';
+                  break;
+          }
+      }
+
+      function startGame() {
+          level = 1;
+          initAudio();
+          createLines();
+          setGameState('playing');
+          if (!animationFrameId) {
+              draw();
+          }
+      }
+
+      function nextLevel() {
+          level++;
+          createLines();
+          setGameState('playing');
+      }
+
+      function createLines() {
+        lines = [];
+        score = 0;
+        confetti = [];
+        maxTimeForLevel = Math.max(10, 30 - (level - 1) * 5);
+        timeLeft = maxTimeForLevel;
+        clearInterval(timerInterval);
+        timerStarted = false;
+        timerBar.style.transition = 'none';
+        timerBar.style.width = '100%';
+        setTimeout(() => { timerBar.style.transition = 'width 0.3s ease'; }, 10);
+
+        const area = window.innerWidth * window.innerHeight;
+        const baseDensity = isMobile ? 0.000024 : 0.00003; // Increased by 20% (0.00002 -> 0.000024, 0.000025 -> 0.00003)
+        const levelDensity = isMobile ? 0.0000024 : 0.000003; // Increased by 20% (0.000002 -> 0.0000024, 0.0000025 -> 0.000003)
+        const density = baseDensity + (level * levelDensity);
+        const maxLines = isMobile ? 60 : 90; // Increased by 20% (50 -> 60, 75 -> 90)
+        numLines = Math.min(Math.floor(area * density), maxLines);
+        
+        const palette = ['#CCCCCC', '#CBA3E3', '#F0FF5A', '#86B9F7', '#EBD9FF', '#FFB998'];
+        const paletteLength = palette.length;
+        
+        for (let i = 0; i < numLines; i++) {
+          const x = Math.random() * window.innerWidth;
+          const y = Math.random() * window.innerHeight;
+          const length = 80;
+          const angle = Math.random() * TWO_PI;
+          const color = palette[i % paletteLength];
+          const z = Math.random();
+          const halfLength = length * 0.5;
+          const cosAngle = Math.cos(angle);
+          const sinAngle = Math.sin(angle);
+          const xOffset = cosAngle * halfLength;
+          const yOffset = sinAngle * halfLength;
+          
+          lines.push({ 
+            x, y, z, angle, length, baseAngle: angle, color, 
+            vx: 0, vy: 0, collected: false, 
+            end1x: x - xOffset, end1y: y - yOffset, 
+            end2x: x + xOffset, end2y: y + yOffset,
+            // Pre-calculate some values for performance
+            cosAngle, sinAngle, halfLength
+          });
+        }
+      }
+      
+      // Optimized draw function with batching and reduced calculations
+      function draw() {
+        // Clear with optimized method
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        frameCount++;
+        const shouldUpdatePerformance = frameCount - lastPerformanceUpdate > PERFORMANCE_UPDATE_INTERVAL;
+        if (shouldUpdatePerformance) {
+          lastPerformanceUpdate = frameCount;
+        }
+        
+        // Pre-calculate mouse position and collected lines data
+        const mouseX = gameIsFrozen ? cursor.x : mouse.x; // Use frozen cursor position when game is lost
+        const mouseY = gameIsFrozen ? cursor.y : mouse.y;
+        const collected = [];
+        let collectedCount = 0;
+        
+        // Optimized collected lines gathering
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].collected) {
+            collected[collectedCount++] = lines[i];
+          }
+        }
+        
+        const fallbackX = window.innerWidth * 0.5;
+        const fallbackY = window.innerHeight * 0.5;
+        let avgX = fallbackX;
+        let avgY = fallbackY;
+        
+        if (collectedCount > 0) {
+          let sumX = 0, sumY = 0;
+          for (let i = 0; i < collectedCount; i++) {
+            sumX += collected[i].x;
+            sumY += collected[i].y;
+          }
+          avgX = sumX / collectedCount;
+          avgY = sumY / collectedCount;
+        }
+
+        // Batch line processing for better performance
+        const currentTime = Date.now();
+        const timeMultiplier = isMobile ? 0.0003 : 0.0005; // Slower animation on mobile
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          const dx = mouseX - line.x;
+          const dy = mouseY - line.y;
+          const distSq = dx * dx + dy * dy;
+
+          // Collection check - only when game is playing and not frozen
+          if (gameState === 'playing' && !gameIsFrozen && distSq < COLLECTION_DIST_SQ && !line.collected) {
+            line.collected = true;
+            score++;
+            if (audioReady && noteQueue.length < 4) { // Limit audio queue size
+                const notes = ['C4', 'E4', 'G4', 'A4', 'C5', 'D5', 'E5', 'G5'];
+                noteQueue.push({ name: notes[score % 8], duration: '8n' });
+            }
+          }
+          
+          // Physics updates - freeze when game is lost
+          if (!gameIsFrozen) {
+            if (line.collected) {
+              const mouseForce = 0.04; 
+              line.vx += dx * mouseForce;
+              line.vy += dy * mouseForce;
+              if (collectedCount > 1) {
+                  const cohesionForce = 0.01;
+                  line.vx += (avgX - line.x) * cohesionForce;
+                  line.vy += (avgY - line.y) * cohesionForce;
+              }
+            } else {
+              // Only apply repulsion force if mouse is close enough
+              if (distSq < INTERACTION_DIST_SQ) {
+                  const dist = Math.sqrt(distSq);
+                  const force = Math.min(1500 / (dist * dist + 100), 1);
+                  const invDist = 1 / dist;
+                  line.vx += dx * invDist * force;
+                  line.vy += dy * invDist * force;
+              }
+              // Reduce idle sway calculation frequency
+              if (shouldUpdatePerformance || i % 4 === frameCount % 4) { // Every 4th line per frame
+                const idleSway = Math.sin(currentTime * timeMultiplier + line.z * 5) * 0.008;
+                line.angle += idleSway;
+              }
+            }
+
+            // Apply velocity with optimized damping
+            line.vx *= 0.85; 
+            line.vy *= 0.85;
+            const velocityMultiplier = 0.8 + line.z * 0.4;
+            line.x += line.vx * velocityMultiplier; 
+            line.y += line.vy * velocityMultiplier;
+            
+            // Angle interpolation
+            const targetAngle = line.baseAngle + 0.5 * Math.sin(Math.atan2(dy, dx) - line.baseAngle);
+            line.angle += (targetAngle - line.angle) * 0.1;
+            
+            // Update pre-calculated trig values when angle changes significantly
+            if (Math.abs(line.angle - line.baseAngle) > 0.1) {
+              line.cosAngle = Math.cos(line.angle);
+              line.sinAngle = Math.sin(line.angle);
+            }
+          }
+        }
+
+        // Batch rendering for better performance
+        ctx.lineWidth = 3;
+        
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i];
+          
+          // Apply blur only when necessary and batch similar blur amounts - skip on mobile
+          if (!line.collected && !isMobile) {
+              const blurAmount = (1 - line.z) * 3; // Reduced max blur
+              if (blurAmount > 0.5) { 
+                ctx.filter = `blur(${Math.floor(blurAmount)}px)`; 
+              }
+          }
+
+          // Calculate line endpoints with lag
+          const xOffset = line.cosAngle * line.halfLength;
+          const yOffset = line.sinAngle * line.halfLength;
+          const lagFactor = 0.5;
+          
+          line.end1x += (line.x - xOffset - line.end1x) * lagFactor;
+          line.end1y += (line.y - yOffset - line.end1y) * lagFactor;
+          line.end2x += (line.x + xOffset - line.end2x) * lagFactor;
+          line.end2y += (line.y + yOffset - line.end2y) * lagFactor;
+
+          // Batch similar colors together (would require sorting, simplified here)
+          ctx.strokeStyle = line.color;
+          ctx.globalAlpha = 0.5 + line.z * 0.5; 
+          
+          ctx.beginPath();
+          ctx.moveTo(line.end1x, line.end1y);
+          ctx.quadraticCurveTo(line.x, line.y, line.end2x, line.end2y);
+          ctx.stroke();
+          
+          if (ctx.filter !== 'none') {
+            ctx.filter = 'none';
+          }
+        }
+        
+        ctx.globalAlpha = 1;
+
+        // Optimized eye rendering
+        if (gameState !== 'start-menu' && imagesLoaded === 2) {
+          const spacing = 10;
+          const size = 20;
+          const eyePositions = [avgX - spacing, avgX + spacing];
+          
+          for (let i = 0; i < 2; i++) {
+            const eyeX = eyePositions[i];
+            const eyeY = avgY;
+            
+            ctx.drawImage(eyeWhiteImg, eyeX - size * 0.5, eyeY - size * 0.5, size, size);
+            
+            const dx = cursor.x - eyeX;
+            const dy = cursor.y - eyeY;
+            const angle = Math.atan2(dy, dx);
+            const pupilOffset = size * 0.2;
+            const pupilX = eyeX + Math.cos(angle) * pupilOffset;
+            const pupilY = eyeY + Math.sin(angle) * pupilOffset;
+            const pupilSize = size * 1.125; // Optimized calculation
+            
+            ctx.drawImage(pupilImg, pupilX - pupilSize * 0.5, pupilY - pupilSize * 0.5, pupilSize, pupilSize);
+          }
+        }
+
+        // Optimized confetti rendering
+        for (let i = confetti.length - 1; i >= 0; i--) {
+          const c = confetti[i];
+          c.y += c.speed; 
+          c.angle += c.rotationSpeed; 
+          c.life--;
+          
+          const cosAngle = Math.cos(c.angle);
+          const sinAngle = Math.sin(c.angle);
+          const halfLength = c.length * 0.5;
+          const xOffset = cosAngle * halfLength;
+          const yOffset = sinAngle * halfLength;
+          
+          ctx.strokeStyle = c.color; 
+          ctx.lineWidth = 3; 
+          ctx.beginPath();
+          ctx.moveTo(c.x - xOffset, c.y - yOffset);
+          ctx.lineTo(c.x + xOffset, c.y + yOffset);
+          ctx.stroke();
+          
+          if (c.life <= 0 || c.y > window.innerHeight + c.length) { 
+            confetti.splice(i, 1); 
+          }
+        }
+        
+        // Win condition check
+        if (gameState === 'playing' && score >= numLines) {
+          setGameState('win');
+          clearInterval(timerInterval);
+          if (audioReady) { 
+            noteQueue.push({ name: ["C4", "E4", "G4", "C5"], duration: "2n" }); 
+          }
+          
+          // Optimized confetti generation
+          const confettiCount = Math.min(200, numLines * 2);
+          for (let i = 0; i < confettiCount; i++) {
+              confetti.push({ 
+                x: Math.random() * window.innerWidth, 
+                y: -Math.random() * window.innerHeight, 
+                length: 30 + Math.random() * 30, 
+                angle: Math.random() * TWO_PI, 
+                rotationSpeed: (Math.random() - 0.5) * 0.1, 
+                speed: Math.random() * 3 + 2, 
+                color: lines[i % lines.length]?.color || '#FFFFFF', 
+                life: 300 
+              });
+          }
+          setTimeout(nextLevel, 3000);
+        }
+
+        // UI updates (less frequent) - reduce frequency on mobile
+        const uiUpdateInterval = isMobile ? 20 : 10;
+        if (gameState === 'playing' && frameCount % uiUpdateInterval === 0) {
+          const levelStr = level.toString().padStart(2, '0');
+          info.textContent = `Score: ${score}/${numLines} | Level ${levelStr} | Time: ${timeLeft}s`;
+          timerBar.style.width = `${(timeLeft / maxTimeForLevel) * 100}%`;
+        }
+
+        // Smooth mouse following - freeze when game is lost
+        if (!gameIsFrozen) {
+          mouse.x += (cursor.x - mouse.x) * 0.2;
+          mouse.y += (cursor.y - mouse.y) * 0.2;
+        }
+        
+        // Cursor rendering
+        ctx.fillStyle = '#ffffff'; 
+        ctx.beginPath(); 
+        ctx.arc(cursor.x, cursor.y, 5, 0, TWO_PI); 
+        ctx.fill();
+        
+        animationFrameId = requestAnimationFrame(draw);
+      }
+
+      // Touch event handling for mobile
+      function handleTouch(e) {
+        e.preventDefault();
+        const touch = e.touches[0] || e.changedTouches[0];
+        if (touch) {
+          cursor.x = touch.clientX;
+          cursor.y = touch.clientY;
+          
+          if (gameState === 'playing' && !timerStarted) {
+            timerStarted = true;
+            timerInterval = setInterval(() => {
+              if (gameState !== 'playing') return clearInterval(timerInterval);
+              timeLeft--;
+              if (timeLeft <= 0) {
+                timeLeft = 0;
+                setGameState('lose');
+                if (audioReady && noteQueue.length < 2) { 
+                  noteQueue.push({ name: "C2", duration: "1n" }); 
+                }
+                clearInterval(timerInterval);
+              }
+            }, 1000);
+          }
+        }
+      }
+
+      // --- Event Listeners ---
+      startButton.addEventListener('click', startGame);
+
+      // Throttled resize handler
+      let resizeTimeout;
+      window.addEventListener('resize', () => {
+          clearTimeout(resizeTimeout);
+          resizeTimeout = setTimeout(() => {
+              setCanvasSize();
+              repositionLinesOnResize();
+          }, 100);
+      });
+
+      // Mouse and touch event handlers
+      if (isMobile) {
+        canvas.addEventListener('touchstart', handleTouch, { passive: false });
+        canvas.addEventListener('touchmove', handleTouch, { passive: false });
+        canvas.addEventListener('touchend', handleTouch, { passive: false });
+      } else {
+        canvas.addEventListener('mousemove', (e) => {
+          cursor.x = e.clientX;
+          cursor.y = e.clientY;
+          
+          if (gameState === 'playing' && !timerStarted) {
+            timerStarted = true;
+            timerInterval = setInterval(() => {
+              if (gameState !== 'playing') return clearInterval(timerInterval);
+              timeLeft--;
+              if (timeLeft <= 0) {
+                timeLeft = 0;
+                setGameState('lose');
+                if (audioReady && noteQueue.length < 2) { 
+                  noteQueue.push({ name: "C2", duration: "1n" }); 
+                }
+                clearInterval(timerInterval);
+              }
+            }, 1000);
+          }
+        });
+      }
+
+      // Enhanced error handling
+      window.onerror = function(message, source, lineno, colno, error) {
+          if (animationFrameId) {
+              cancelAnimationFrame(animationFrameId);
+          }
+          console.error('Game Error:', { message, source, lineno, colno, error });
+          document.body.innerHTML = `<div style="padding: 20px; text-align: center; color: white; font-family: monospace;">
+              <h2>An unexpected error occurred.</h2>
+              <p>Please refresh the page to try again.</p>
+              <p style="color: #ff8a8a; font-size: 0.8em;">Error: ${message}</p>
+          </div>`;
+          return true;
+      };
+
+      // --- Initial Setup ---
+      setCanvasSize();
+      setGameState('start-menu');
+      createLines();
+      draw();
+    })();
+  </script>
+</body>
+</html>
